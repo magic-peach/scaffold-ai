@@ -1,0 +1,18 @@
+[package]
+name = "scaffold-github"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+scaffold-domain = { workspace = true }
+octocrab = { workspace = true }
+jsonwebtoken = "9"
+http = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }

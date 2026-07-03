@@ -1,0 +1,32 @@
+[package]
+name = "scaffold-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "scaffold-server"
+path = "src/main.rs"
+
+[dependencies]
+scaffold-domain = { workspace = true }
+scaffold-agent = { workspace = true }
+scaffold-anthropic = { workspace = true }
+scaffold-github = { workspace = true }
+scaffold-autumn = { workspace = true }
+scaffold-store = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+wiremock = { workspace = true }
+reqwest = { workspace = true }
+async-trait = { workspace = true }
+tower = { version = "0.5", features = ["util"] }
+base64 = "0.22"
