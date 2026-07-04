@@ -3,3 +3,4 @@
 *.pem
 !crates/scaffold-server/tests/fixtures/test-github-app-key.pem
 .DS_Store
+cloudflared.tgz

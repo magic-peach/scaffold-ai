@@ -58,6 +58,141 @@ fn host_err(context: &str, e: impl std::fmt::Display) -> TriageError {
     TriageError::Host(format!("{context}: {e}"))
 }
 
+/// One recorded webhook delivery attempt, for diagnostics.
+pub struct DeliverySummary {
+    pub event: String,
+    pub guid: String,
+    pub action: String,
+    pub status: String,
+    pub status_code: i64,
+    pub delivered_at: String,
+}
+
+/// Fetch the App's configured webhook URL and recent delivery outcomes.
+/// The config endpoint's `secret` field is deliberately never read.
+pub async fn webhook_diagnostics(
+    config: GithubConfig,
+) -> Result<(String, Vec<DeliverySummary>), TriageError> {
+    let host = GithubHost::new(config)?;
+    let app = &host.app_client;
+
+    let hook: serde_json::Value = app
+        .get("/app/hook/config", None::<&()>)
+        .await
+        .map_err(|e| host_err("GET /app/hook/config", e))?;
+    let url = hook["url"].as_str().unwrap_or("(none)").to_string();
+
+    let deliveries: serde_json::Value = app
+        .get("/app/hook/deliveries?per_page=8", None::<&()>)
+        .await
+        .map_err(|e| host_err("GET /app/hook/deliveries", e))?;
+    let summaries = deliveries
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .map(|d| DeliverySummary {
+                    event: d["event"].as_str().unwrap_or("?").to_string(),
+                    guid: d["guid"].as_str().unwrap_or("?").to_string(),
+                    action: d["action"].as_str().unwrap_or("-").to_string(),
+                    status: d["status"].as_str().unwrap_or("?").to_string(),
+                    status_code: d["status_code"].as_i64().unwrap_or(0),
+                    delivered_at: d["delivered_at"].as_str().unwrap_or("?").to_string(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok((url, summaries))
+}
+
+/// Update the App's webhook delivery URL (used when a dev tunnel rotates).
+/// Touches only `url` — the secret and other config are left untouched.
+pub async fn set_webhook_url(config: GithubConfig, url: &str) -> Result<(), TriageError> {
+    let host = GithubHost::new(config)?;
+    let _: serde_json::Value = host
+        .app_client
+        .patch(
+            "/app/hook/config".to_string(),
+            Some(&serde_json::json!({ "url": url })),
+        )
+        .await
+        .map_err(|e| host_err("PATCH /app/hook/config", e))?;
+    Ok(())
+}
+
+/// Result of a live App-auth verification. Carries no secret material —
+/// only installation identity and the minted token's expiry.
+pub struct AuthCheckReport {
+    /// (installation id, account login) for every installation of the App.
+    pub installations: Vec<(u64, String)>,
+    /// The installation the token was minted for.
+    pub installation_id_used: u64,
+    pub token_expires_at: Option<String>,
+    /// full_name of every repo the installation can access.
+    pub accessible_repos: Vec<String>,
+}
+
+/// Exercise the real auth chain — private key → JWT → installation access
+/// token — against the live GitHub API. The token value is dropped here and
+/// never returned.
+pub async fn check_app_auth(
+    config: GithubConfig,
+    installation_override: Option<u64>,
+) -> Result<AuthCheckReport, TriageError> {
+    let host = GithubHost::new(config)?;
+    let app = &host.app_client;
+
+    let installations = app
+        .apps()
+        .installations()
+        .send()
+        .await
+        .map_err(|e| host_err("GET /app/installations (JWT rejected or App ID wrong?)", e))?;
+    let installations: Vec<(u64, String)> = installations
+        .items
+        .into_iter()
+        .map(|i| (i.id.0, i.account.login))
+        .collect();
+    if installations.is_empty() {
+        return Err(TriageError::Host(
+            "JWT accepted, but the App has no installations — install it on a repo first".into(),
+        ));
+    }
+
+    let installation_id_used = installation_override.unwrap_or(installations[0].0);
+    let token: octocrab::models::InstallationToken = app
+        .post(
+            format!("/app/installations/{installation_id_used}/access_tokens"),
+            None::<&()>,
+        )
+        .await
+        .map_err(|e| host_err("minting installation token", e))?;
+
+    let inst_client = app
+        .installation(InstallationId(installation_id_used))
+        .map_err(|e| host_err("installation client", e))?;
+    let repos: serde_json::Value = inst_client
+        .get("/installation/repositories", None::<&()>)
+        .await
+        .map_err(|e| host_err("GET /installation/repositories", e))?;
+    let accessible_repos = repos["repositories"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|r| r["full_name"].as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(AuthCheckReport {
+        installations,
+        installation_id_used,
+        token_expires_at: token.expires_at,
+        accessible_repos,
+    })
+}
+
 fn map_check_conclusion(status: &str, conclusion: Option<&str>) -> CheckConclusion {
     match conclusion {
         Some("success") => CheckConclusion::Success,

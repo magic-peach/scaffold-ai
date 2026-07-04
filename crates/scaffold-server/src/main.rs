@@ -5,6 +5,7 @@ use anyhow::Context;
 use scaffold_anthropic::{AnthropicConfig, AnthropicTriageModel};
 use scaffold_autumn::{AutumnBilling, AutumnConfig};
 use scaffold_github::{GithubConfig, GithubHost};
+use scaffold_server::config::ServerConfig;
 use scaffold_server::{build_router, worker, AppState};
 use scaffold_store::PgStore;
 
@@ -17,47 +18,34 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let bind_addr = env_or("BIND_ADDR", "0.0.0.0:8080");
-    let database_url = require_env("DATABASE_URL")?;
-    let webhook_secret = require_env("GITHUB_WEBHOOK_SECRET")?;
-    let app_id: u64 = require_env("GITHUB_APP_ID")?
-        .parse()
-        .context("GITHUB_APP_ID must be a number")?;
-    let private_key_pem = match std::env::var("GITHUB_PRIVATE_KEY") {
-        Ok(pem) => pem,
-        Err(_) => {
-            let path = require_env("GITHUB_PRIVATE_KEY_PATH")
-                .context("set GITHUB_PRIVATE_KEY or GITHUB_PRIVATE_KEY_PATH")?;
-            std::fs::read_to_string(&path)
-                .with_context(|| format!("reading GitHub App key from {path}"))?
-        }
-    };
+    // Fail fast with a complete list of config problems.
+    let config = ServerConfig::load()?;
 
-    let mut anthropic_config = AnthropicConfig::new(require_env("ANTHROPIC_API_KEY")?);
-    if let Ok(model) = std::env::var("ANTHROPIC_MODEL") {
-        anthropic_config.model = model;
+    let mut anthropic_config = AnthropicConfig::new(config.anthropic_api_key.clone());
+    if let Some(model) = &config.anthropic_model {
+        anthropic_config.model = model.clone();
     }
-    if let Ok(base) = std::env::var("ANTHROPIC_BASE_URL") {
-        anthropic_config.base_url = base;
+    if let Some(base) = &config.anthropic_base_url {
+        anthropic_config.base_url = base.clone();
     }
 
-    let mut autumn_config = AutumnConfig::new(require_env("AUTUMN_SECRET_KEY")?);
-    if let Ok(base) = std::env::var("AUTUMN_BASE_URL") {
-        autumn_config.base_url = base;
+    let mut autumn_config = AutumnConfig::new(config.autumn_secret_key.clone());
+    if let Some(base) = &config.autumn_base_url {
+        autumn_config.base_url = base.clone();
     }
 
-    let store = PgStore::connect(&database_url)
+    let store = PgStore::connect(&config.database_url)
         .await
         .context("connecting to Postgres")?;
     let host = GithubHost::new(GithubConfig {
-        app_id,
-        private_key_pem,
-        base_url: std::env::var("GITHUB_BASE_URL").ok(),
+        app_id: config.github_app_id,
+        private_key_pem: config.github_private_key_pem.clone(),
+        base_url: config.github_base_url.clone(),
     })
     .context("building GitHub client")?;
 
     let state = Arc::new(AppState {
-        webhook_secret,
+        webhook_secret: config.webhook_secret.clone(),
         store: Arc::new(store),
         host: Arc::new(host),
         model: Arc::new(AnthropicTriageModel::new(anthropic_config)),
@@ -70,18 +58,10 @@ async fn main() -> anyhow::Result<()> {
         Duration::from_secs(60),
     ));
 
-    let listener = tokio::net::TcpListener::bind(&bind_addr)
+    let listener = tokio::net::TcpListener::bind(&config.bind_addr)
         .await
-        .with_context(|| format!("binding {bind_addr}"))?;
-    tracing::info!(%bind_addr, "scaffold-ai listening");
+        .with_context(|| format!("binding {}", config.bind_addr))?;
+    tracing::info!(bind_addr = %config.bind_addr, "scaffold-ai listening");
     axum::serve(listener, build_router(state)).await?;
     Ok(())
-}
-
-fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key).unwrap_or_else(|_| default.to_string())
-}
-
-fn require_env(key: &str) -> anyhow::Result<String> {
-    std::env::var(key).with_context(|| format!("missing required env var {key}"))
 }

@@ -27,6 +27,7 @@ pub async fn run_worker(state: Arc<AppState>, poll_interval: Duration) {
         match state.store.claim_next_job().await {
             Ok(Some(job)) => {
                 let job_id = job.id;
+                tracing::info!(job_id, pr = %job.pr, ?job.trigger, "worker claimed job, starting triage");
                 if let Err(e) = process_job(&state, job).await {
                     tracing::error!(job_id, error = %e, "job processing error");
                 }

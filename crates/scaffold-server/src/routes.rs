@@ -32,6 +32,10 @@ async fn github_webhook(
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default();
     if !verify_signature(&state.webhook_secret, &body, signature) {
+        tracing::warn!(
+            has_signature_header = !signature.is_empty(),
+            "webhook rejected: signature verification failed (secret mismatch or missing header)"
+        );
         return (StatusCode::UNAUTHORIZED, "invalid signature");
     }
 
@@ -46,6 +50,8 @@ async fn github_webhook(
     if delivery_id.is_empty() {
         return (StatusCode::BAD_REQUEST, "missing delivery id");
     }
+
+    tracing::info!(event, delivery_id, "webhook received, signature verified");
 
     match event {
         "pull_request" => handle_pull_request(&state, delivery_id, &body).await,
@@ -80,7 +86,10 @@ async fn handle_pull_request(
     };
 
     match state.store.enqueue_job(delivery_id, &pr, trigger).await {
-        Ok(true) => (StatusCode::ACCEPTED, "queued"),
+        Ok(true) => {
+            tracing::info!(pr = %pr, ?trigger, delivery_id, "payload parsed, triage job enqueued");
+            (StatusCode::ACCEPTED, "queued")
+        }
         Ok(false) => (StatusCode::OK, "duplicate delivery"),
         Err(e) => {
             tracing::error!(error = %e, pr = %pr, "failed to enqueue triage job");

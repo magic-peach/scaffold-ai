@@ -1779,6 +1779,7 @@ dependencies = [
  "axum",
  "base64",
  "chrono",
+ "dotenvy",
  "reqwest",
  "scaffold-agent",
  "scaffold-anthropic",
