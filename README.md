@@ -132,3 +132,7 @@ cargo test --workspace
 ```
 
 Unit tests cover policy checks, decision resolution, config parsing, and signature verification. The integration suite (`crates/scaffold-server/tests/pipeline.rs`) drives the real HTTP clients end-to-end — signed webhook in, comment/labels out — against wiremock-faked GitHub, Anthropic, and Autumn APIs, including the quota-denied, billing-outage (fail-open + re-track), and dead-job escalation paths.
+
+## Status
+
+Live webhook pipeline verified end-to-end on a real GitHub App installation.
