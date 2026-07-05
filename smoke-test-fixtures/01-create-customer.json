@@ -1,0 +1,30 @@
+{
+  "request": {
+    "body": {
+      "id": "scaffold-smoke-1783139506",
+      "name": "Scaffold smoke test"
+    },
+    "method": "POST",
+    "path": "/customers"
+  },
+  "response": {
+    "body": {
+      "balances": {},
+      "billing_controls": {},
+      "config": {},
+      "created_at": 1783139509938,
+      "email": null,
+      "env": "sandbox",
+      "fingerprint": null,
+      "flags": {},
+      "id": "scaffold-smoke-1783139506",
+      "metadata": {},
+      "name": "Scaffold smoke test",
+      "purchases": [],
+      "send_email_receipts": false,
+      "stripe_id": null,
+      "subscriptions": []
+    },
+    "status": 200
+  }
+}

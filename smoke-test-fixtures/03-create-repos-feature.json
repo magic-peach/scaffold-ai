@@ -1,0 +1,23 @@
+{
+  "request": {
+    "body": {
+      "consumable": false,
+      "id": "repos",
+      "name": "Repos",
+      "type": "metered"
+    },
+    "method": "POST",
+    "path": "/features"
+  },
+  "response": {
+    "body": {
+      "archived": false,
+      "consumable": false,
+      "event_names": [],
+      "id": "repos",
+      "name": "Repos",
+      "type": "metered"
+    },
+    "status": 200
+  }
+}

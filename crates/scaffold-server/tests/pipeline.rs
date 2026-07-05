@@ -328,6 +328,41 @@ fn received_bodies<'a>(
 use scaffold_domain::TriageStore;
 
 #[tokio::test]
+async fn installation_created_onboards_customer_and_tracks_repos() {
+    let stack = stack().await;
+    Mock::given(method("POST"))
+        .and(path("/customers"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "gh-install-42"})))
+        .mount(&stack.autumn)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/track"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": 1})))
+        .mount(&stack.autumn)
+        .await;
+
+    let payload = json!({
+        "action": "created",
+        "installation": { "id": 42 },
+        "repositories": [{ "full_name": "acme/demo" }]
+    });
+    let (status, _) = post_webhook(stack.state.clone(), "installation", "d-install", &payload).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let requests = stack.autumn.received_requests().await.unwrap();
+    let creates = received_bodies(&requests, "POST", "/customers");
+    assert_eq!(creates.len(), 1);
+    let create_body: Value = serde_json::from_slice(&creates[0].body).unwrap();
+    assert_eq!(create_body["id"], "gh-install-42");
+
+    let tracks = received_bodies(&requests, "POST", "/track");
+    assert_eq!(tracks.len(), 1);
+    let track_body: Value = serde_json::from_slice(&tracks[0].body).unwrap();
+    assert_eq!(track_body["feature_id"], "repos");
+    assert_eq!(track_body["value"], 1);
+}
+
+#[tokio::test]
 async fn rejects_invalid_signature() {
     let stack = stack().await;
     let body = serde_json::to_vec(&pr_opened_payload()).unwrap();

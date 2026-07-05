@@ -72,6 +72,11 @@ pub trait BillingGate: Send + Sync {
 
     async fn check_repo(&self, installation_id: u64) -> BillingVerdict;
 
+    /// Idempotent onboarding: ensure the billing customer for this
+    /// installation exists (the free plan auto-enables at creation).
+    /// Safe to call repeatedly and on webhook retries.
+    async fn ensure_customer(&self, installation_id: u64) -> Result<(), TriageError>;
+
     async fn track_triage(
         &self,
         installation_id: u64,

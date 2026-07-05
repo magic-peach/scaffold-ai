@@ -1,0 +1,18 @@
+{
+  "request": {
+    "body": {
+      "customer_id": "scaffold-smoke-1783139506",
+      "feature_id": "definitely_not_a_feature_xyz"
+    },
+    "method": "POST",
+    "path": "/check"
+  },
+  "response": {
+    "body": {
+      "code": "feature_not_found",
+      "env": "sandbox",
+      "message": "Feature definitely_not_a_feature_xyz not found"
+    },
+    "status": 404
+  }
+}

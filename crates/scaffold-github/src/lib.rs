@@ -60,12 +60,34 @@ fn host_err(context: &str, e: impl std::fmt::Display) -> TriageError {
 
 /// One recorded webhook delivery attempt, for diagnostics.
 pub struct DeliverySummary {
+    /// Numeric delivery id — pass to [`redeliver`] to replay it.
+    pub id: i64,
     pub event: String,
     pub guid: String,
     pub action: String,
     pub status: String,
     pub status_code: i64,
     pub delivered_at: String,
+}
+
+/// Ask GitHub to redeliver a previously failed webhook delivery.
+pub async fn redeliver(config: GithubConfig, delivery_id: i64) -> Result<(), TriageError> {
+    let host = GithubHost::new(config)?;
+    let response = host
+        .app_client
+        ._post(
+            format!("/app/hook/deliveries/{delivery_id}/attempts"),
+            None::<&()>,
+        )
+        .await
+        .map_err(|e| host_err("POST redelivery", e))?;
+    if !response.status().is_success() {
+        return Err(TriageError::Host(format!(
+            "redelivery of {delivery_id} returned {}",
+            response.status()
+        )));
+    }
+    Ok(())
 }
 
 /// Fetch the App's configured webhook URL and recent delivery outcomes.
@@ -92,6 +114,7 @@ pub async fn webhook_diagnostics(
             items
                 .iter()
                 .map(|d| DeliverySummary {
+                    id: d["id"].as_i64().unwrap_or(0),
                     event: d["event"].as_str().unwrap_or("?").to_string(),
                     guid: d["guid"].as_str().unwrap_or("?").to_string(),
                     action: d["action"].as_str().unwrap_or("-").to_string(),

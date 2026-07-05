@@ -1,0 +1,20 @@
+{
+  "request": {
+    "body": {
+      "customer_id": "scaffold-smoke-1783139506",
+      "feature_id": "pr_triage"
+    },
+    "method": "POST",
+    "path": "/check"
+  },
+  "response": {
+    "body": {
+      "allowed": false,
+      "balance": null,
+      "customer_id": "scaffold-smoke-1783139506",
+      "flag": null,
+      "required_balance": 1
+    },
+    "status": 200
+  }
+}

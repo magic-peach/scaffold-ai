@@ -5,7 +5,7 @@
 //!
 //! Never prints the webhook secret.
 
-use scaffold_github::{set_webhook_url, webhook_diagnostics, GithubConfig};
+use scaffold_github::{redeliver, set_webhook_url, webhook_diagnostics, GithubConfig};
 use scaffold_server::config::ServerConfig;
 
 #[tokio::main]
@@ -28,6 +28,18 @@ async fn main() -> anyhow::Result<()> {
         println!("webhook URL updated to: {new_url}\n");
     }
 
+    // Optional: `--redeliver <numeric-id>` (repeatable) replays failed deliveries.
+    for (pos, arg) in args.iter().enumerate() {
+        if arg == "--redeliver" {
+            let id: i64 = args
+                .get(pos + 1)
+                .ok_or_else(|| anyhow::anyhow!("--redeliver requires a delivery id"))?
+                .parse()?;
+            redeliver(gh.clone(), id).await?;
+            println!("redelivery requested for delivery {id}");
+        }
+    }
+
     let (url, deliveries) = webhook_diagnostics(gh).await?;
 
     println!("configured webhook URL: {url}");
@@ -37,8 +49,8 @@ async fn main() -> anyhow::Result<()> {
     }
     for d in deliveries {
         println!(
-            "  - {} guid={} action={} status={} ({}) at {}",
-            d.event, d.guid, d.action, d.status, d.status_code, d.delivered_at
+            "  - id={} {} action={} status={} ({}) at {}",
+            d.id, d.event, d.action, d.status, d.status_code, d.delivered_at
         );
     }
     Ok(())

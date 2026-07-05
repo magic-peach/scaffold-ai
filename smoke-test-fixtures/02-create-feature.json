@@ -1,0 +1,23 @@
+{
+  "request": {
+    "body": {
+      "consumable": true,
+      "id": "pr_triage",
+      "name": "PR triage",
+      "type": "metered"
+    },
+    "method": "POST",
+    "path": "/features"
+  },
+  "response": {
+    "body": {
+      "archived": false,
+      "consumable": true,
+      "event_names": [],
+      "id": "pr_triage",
+      "name": "PR triage",
+      "type": "metered"
+    },
+    "status": 200
+  }
+}

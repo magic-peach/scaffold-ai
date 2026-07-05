@@ -103,6 +103,29 @@ async fn handle_installation(state: &AppState, body: &[u8]) -> (StatusCode, &'st
     let Ok(event) = serde_json::from_slice::<InstallationEvent>(body) else {
         return (StatusCode::OK, "ignored");
     };
+
+    // Onboarding: creating the Autumn customer is all that's needed — the
+    // free plan auto-enables at creation, and the create is an idempotent
+    // upsert, so webhook retries are harmless. On failure we log and still
+    // return 2xx: the billing gate self-heals on the first triage check.
+    if event.action == "created" {
+        match state.billing.ensure_customer(event.installation.id).await {
+            Ok(()) => {
+                tracing::info!(
+                    installation = event.installation.id,
+                    "installation onboarded to free plan"
+                )
+            }
+            Err(e) => tracing::error!(
+                error = %e,
+                installation = event.installation.id,
+                "onboarding failed — billing gate will self-heal on first triage"
+            ),
+        }
+    }
+    // On "deleted" the customer is intentionally left in place: it holds the
+    // usage history, and recreating later is a harmless upsert.
+
     let delta = match event.action.as_str() {
         "created" => event.repositories.len() as i64,
         "deleted" => -(event.repositories.len() as i64),

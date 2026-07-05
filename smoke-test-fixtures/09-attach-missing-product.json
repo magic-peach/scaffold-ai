@@ -1,0 +1,18 @@
+{
+  "request": {
+    "body": {
+      "customer_id": "scaffold-smoke-1783139506",
+      "product_id": "definitely_not_a_product_xyz"
+    },
+    "method": "POST",
+    "path": "/attach"
+  },
+  "response": {
+    "body": {
+      "code": "product_not_found",
+      "env": "sandbox",
+      "message": "Product definitely_not_a_product_xyz not found"
+    },
+    "status": 404
+  }
+}
