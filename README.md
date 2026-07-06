@@ -1,138 +1,162 @@
-# Scaffold AI
+# scaffold-ai
 
-Agentic pull-request triage for open-source maintainers and small teams. Install the GitHub App on a repo and every incoming PR gets classified (bug fix / feature / docs / chore / needs-discussion), checked against policy rules (missing tests, unclear description, merge conflicts, failing CI), and answered with a single sticky triage comment plus labels — with anything ambiguous or high-risk escalated to a human maintainer instead of auto-decided.
+A GitHub App that triages incoming pull requests: it classifies each PR, runs
+deterministic policy checks, and posts a single review comment with labels —
+or routes the PR to a human when it isn't confident. Written in Rust
+(`axum` / `tokio` / `sqlx` / `octocrab`), it calls Claude for judgment and
+Autumn for usage metering.
 
-Grown out of a triage pipeline that managed 150+ contributors and 250+ merged PRs during GSSoC 2026.
+The interesting parts are structural, so this README leads with how it's built.
+Setup and run instructions are at the bottom.
 
-## How it works
+## The central constraint: webhooks are fast, triage is slow
+
+GitHub expects a webhook to be answered within about 10 seconds and treats a
+slower response as a failed delivery. A triage run takes tens of seconds — a
+recorded run was ~15s — from two Claude round-trips plus several GitHub API
+calls, already past the 10-second budget. The two can't share a request
+handler, so the system is split in two:
 
 ```
-GitHub webhook ──▶ axum server ──▶ Postgres job queue ──▶ worker
-                   (verify HMAC,                          │
-                    dedupe, 202)                          ▼
-                                          billing gate (Autumn check)
-                                                          │
-                                                          ▼
-                              agent loop: gather ▶ classify ▶ policy-check ▶ decide ▶ act
-                                          (Claude, typed JSON)   (plain Rust)  (Claude)
-                                                          │
-                                                          ▼
-                                    comment + labels on the PR · usage tracked (Autumn)
-                                    escalations: label + @maintainers + reviewer request
+GitHub ──webhook──▶ axum handler                 Postgres job queue
+                    - verify HMAC signature   ┌─▶ triage_jobs
+                    - deserialize             │   (queued│running│done│dead)
+                    - enqueue ────────────────┘
+                    - return 202 Accepted
+                                                        │ claim
+                                                        ▼
+                                                     worker
+                    fetch PR ▶ policy-check ▶ classify ▶ decide ▶ act
+                    (octocrab)   (Rust)      (Claude)  (Claude)  (comment+labels)
+                                                        │
+                                              billing gate (Autumn) around it
 ```
 
-Design principles:
+The HTTP handler does only cheap, bounded work and returns immediately. All slow
+work happens in a decoupled worker that polls the queue. This is the design's
+load-bearing decision, not an incidental optimization.
 
-- **Typed model calls.** Both Claude calls (classify, decide) use structured outputs with a JSON schema and deserialize directly into Rust structs. A malformed response fails the job loudly — after retries it degrades to *human escalation*, never to a guessed decision.
-- **Escalation is an outcome, not an error.** Low confidence, `needs_discussion` classifications, and the model's own judgment all route to a `needs-maintainer-review` label with maintainers mentioned and requested as reviewers.
-- **Deterministic policy checks.** Missing tests, short descriptions, merge conflicts, and failing CI are detected by plain Rust — the model interprets findings, it never invents them.
-- **Fail open on billing outages.** If Autumn is unreachable, triage proceeds and usage is journaled locally, then re-tracked when billing recovers. Real quota denials still block.
+## Job queue (Postgres, no broker)
+
+The queue is an ordinary Postgres table, not a separate message broker.
+
+- **Concurrent claiming.** A worker takes the next job with a single
+  `UPDATE … WHERE id = (SELECT id … WHERE status='queued' AND run_after<=now()
+  ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1)`. `SKIP LOCKED` lets multiple
+  worker processes draw from the same queue at once without blocking on each
+  other and without two workers ever claiming the same row.
+- **Deduplication.** Each job is keyed by GitHub's delivery GUID under a
+  `UNIQUE` constraint with `ON CONFLICT DO NOTHING`, so a redelivered webhook
+  (GitHub's own retries, or a manual replay) enqueues at most once.
+- **Retries and dead-lettering.** A failed job is requeued with a linear
+  backoff (`run_after = now() + 30s × attempts`) and retried up to three times.
+  After that it's marked `dead` and the PR gets a comment plus a
+  `needs-maintainer-review` label — the failure surfaces to a human instead of
+  being silently dropped.
+
+## Trait boundaries
+
+`scaffold-domain` defines the contracts and the types that cross them, and has
+no I/O dependencies:
+
+| Trait | Responsibility |
+|---|---|
+| `TriageModel` | classify a PR, decide a comment/priority |
+| `PullRequestHost` | fetch PR data, post comments/labels/reviewers |
+| `BillingGate` | check and track usage, ensure a customer exists |
+| `TriageStore` | enqueue/claim jobs, record audits, journal usage |
+
+Each adapter crate implements exactly one of these against a real service
+(Anthropic over `reqwest`, GitHub via `octocrab`, Autumn over `reqwest`,
+Postgres via `sqlx`). The agent and server depend only on the traits — so the
+entire pipeline runs in tests against in-memory and `wiremock`-backed fakes
+without a network.
+
+## The agent loop: deterministic checks, model for judgment
+
+The loop is five explicit steps: **gather → policy-check → classify → decide →
+act**. The split between plain code and the model is deliberate:
+
+- **Policy checks are Rust.** Merge conflict, failing CI, a too-thin
+  description, and source files changed without accompanying tests are detected
+  deterministically — no model call, no cost, no variance.
+- **Claude is called exactly twice**, both with structured-output JSON schemas
+  that deserialize directly into Rust structs: once to classify the PR
+  (type, risk, confidence), once to write the review comment and priority. A
+  response that doesn't match the schema fails the step loudly rather than being
+  coerced into a guess.
+- **Escalation is a first-class outcome.** Low model confidence, a
+  `needs_discussion` classification, or the model's own escalate signal route
+  the PR to a human (escalation label, maintainer mention, reviewer request)
+  instead of forcing an automated decision.
+
+## Billing degradation
+
+The billing gate classifies failures instead of treating every non-2xx alike.
+Only a genuine `allowed: false` blocks a triage; the rest degrade rather than
+break:
+
+- **`customer_not_found` (404)** — the installation isn't onboarded yet. The
+  gate performs an idempotent `POST /customers` upsert, then retries the
+  original call once.
+- **`feature_not_found` (404)** — a misconfiguration on our side. Triage
+  proceeds (fail-open) but the error is logged loudly as something to fix; a
+  configuration mistake shouldn't block users.
+- **5xx / network / unparseable** — the provider is unreachable. Triage
+  proceeds and the usage event is written to a Postgres journal table; a
+  background task re-tracks journaled usage once the provider recovers.
 
 ## Workspace layout
 
 | Crate | Role |
 |---|---|
-| `scaffold-domain` | Types + traits, zero I/O. Everything else implements or consumes these. |
-| `scaffold-agent` | The triage orchestrator and policy checks. Depends only on domain traits. |
-| `scaffold-anthropic` | Thin reqwest client for the Anthropic Messages API (structured outputs). |
-| `scaffold-github` | GitHub App auth, PR data, comments/labels/reviewers, webhook signature verify. |
-| `scaffold-autumn` | Autumn `check` / `track` / `attach` client. |
-| `scaffold-store` | Postgres (sqlx) job queue, audit log, usage journal; in-memory impl for tests. |
-| `scaffold-server` | The binary: axum routes, worker loop, wiring. |
+| `scaffold-domain` | Traits and shared types. Zero I/O. |
+| `scaffold-agent` | The five-step triage loop and the deterministic policy checks. |
+| `scaffold-anthropic` | `reqwest` client for the Claude Messages API (structured outputs). |
+| `scaffold-github` | GitHub App auth, PR data, comments/labels/reviewers, webhook HMAC verification. |
+| `scaffold-autumn` | Autumn billing client (`check` / `track` / `attach` / customer upsert). |
+| `scaffold-store` | Postgres job queue, audit log, usage journal; plus an in-memory impl for tests. |
+| `scaffold-server` | The binary: axum routes, the worker loop, and wiring. |
 
-## Local setup
+## Tests
 
-Prerequisites: Rust 1.85+, Postgres 14+, and a tunnel for webhook delivery during development ([smee.io](https://smee.io) or `ngrok`).
+`cargo test --workspace`. Unit tests cover the policy checks, decision
+resolution, config parsing, and signature verification. Integration tests drive
+the real adapter code end-to-end — a signed webhook in, a comment and labels out
+— against `wiremock`-faked GitHub, Anthropic, and Autumn, including the
+quota-denied, billing-outage (fail-open then re-track), and dead-letter
+escalation paths.
+
+## Running it
+
+Prerequisites: Rust, Postgres, and a public webhook URL for local development
+(any tunnel — `cloudflared`, `ngrok`, `smee`).
 
 ```sh
 createdb scaffold_ai
-
-# either copy the template and fill it in...
-cp .env.example .env
-# ...or export the variables directly:
-export DATABASE_URL=postgres://localhost/scaffold_ai
-export GITHUB_APP_ID=<from your GitHub App>
-export GITHUB_PRIVATE_KEY_PATH=./scaffold-ai.private-key.pem
-export GITHUB_WEBHOOK_SECRET=<the secret you set on the App>
-export ANTHROPIC_API_KEY=sk-ant-...
-export AUTUMN_SECRET_KEY=am_sk_...
-
+cp .env.example .env    # then fill in the values below
 cargo run -p scaffold-server
 ```
 
-Migrations are embedded in the binary and run automatically on startup.
+Migrations run automatically on startup.
 
-### Environment variables
+**Required environment:**
 
-| Variable | Required | Default | Purpose |
-|---|---|---|---|
-| `DATABASE_URL` | ✅ | — | Postgres connection string |
-| `GITHUB_APP_ID` | ✅ | — | Numeric App ID |
-| `GITHUB_PRIVATE_KEY` / `GITHUB_PRIVATE_KEY_PATH` | ✅ (one) | — | App RSA key (inline PEM, or path to a `.pem`) |
-| `GITHUB_WEBHOOK_SECRET` | ✅ | — | HMAC secret for webhook verification |
-| `ANTHROPIC_API_KEY` | ✅ | — | Anthropic API key |
-| `AUTUMN_SECRET_KEY` | ✅ | — | Autumn secret key (`am_sk_...`) |
-| `BIND_ADDR` | — | `0.0.0.0:8080` | Listen address |
-| `ANTHROPIC_MODEL` | — | `claude-opus-4-8` | Model for classify + decide |
-| `ANTHROPIC_BASE_URL` / `AUTUMN_BASE_URL` / `GITHUB_BASE_URL` | — | production APIs | Endpoint overrides (tests/staging) |
-| `RUST_LOG` | — | `info,scaffold=debug` | Tracing filter |
+| Variable | Purpose |
+|---|---|
+| `DATABASE_URL` | Postgres connection string |
+| `GITHUB_APP_ID` | numeric App ID |
+| `GITHUB_PRIVATE_KEY` *or* `GITHUB_PRIVATE_KEY_PATH` | App RSA key, inline PEM or a file path |
+| `GITHUB_WEBHOOK_SECRET` | HMAC secret for webhook verification |
+| `ANTHROPIC_API_KEY` | Claude API key |
+| `AUTUMN_SECRET_KEY` | Autumn API key |
 
-## Creating the GitHub App
-
-1. GitHub → Settings → Developer settings → **GitHub Apps** → New GitHub App.
-2. Webhook URL: `https://<your-host>/webhooks/github` (or your smee/ngrok tunnel). Set a **webhook secret** and export it as `GITHUB_WEBHOOK_SECRET`.
-3. **Repository permissions:**
-   - Pull requests: **Read & write** (comments, reviewer requests)
-   - Issues: **Read & write** (labels)
-   - Contents: **Read** (diff, `.scaffold.toml`)
-   - Checks: **Read** (CI status)
-   - Metadata: Read (mandatory)
-4. **Subscribe to events:** `Pull request`, `Installation`, `Installation repositories`.
-5. Generate a **private key** (downloads a `.pem`) and note the **App ID**.
-6. Install the App on a test repository, start the server, open a PR — a triage comment and labels should appear within ~30 seconds.
-
-## Autumn setup
-
-Create two **metered features** in the [Autumn dashboard](https://useautumn.com) — the service only knows these ids; all tier limits and pricing live in Autumn:
-
-- `pr_triage` — one unit per executed triage (billing customer: `gh-install-<installation id>`)
-- `repos` — count of repos with the App installed
-
-Attach them to your products (e.g. Free: 1 repo / 50 triages per month; paid tiers higher). Changing limits or prices never requires a redeploy.
-
-## Per-repo configuration (`.scaffold.toml`)
-
-Optional file on the repo's default branch; every field has a sane default:
-
-```toml
-maintainers = ["alice", "bob"]      # mentioned + requested as reviewers on escalation
-escalation_label = "needs-maintainer-review"
-confidence_threshold = 0.7          # below this, the agent escalates instead of deciding
-cooldown_minutes = 10               # min gap between re-triages on push
-triage_on_synchronize = true        # re-triage (debounced) when new commits are pushed
-min_description_chars = 40
-skip_drafts = true
-test_globs = ["tests/**", "**/*_test.rs"]
-source_globs = ["src/**"]           # changes here without test changes → missing-tests finding
-```
-
-## Docker
+Optional: `BIND_ADDR` (default `0.0.0.0:8080`), `ANTHROPIC_MODEL`, and
+`*_BASE_URL` overrides for pointing the clients at test servers.
 
 ```sh
 docker build -t scaffold-ai .
 docker run --env-file .env -p 8080:8080 scaffold-ai
 ```
 
-The image is a single static-ish binary on `debian:bookworm-slim`; it runs anywhere a container runs (Fly.io, Railway, a VPS) — no vendor-specific services beyond Postgres.
-
-## Tests
-
-```sh
-cargo test --workspace
-```
-
-Unit tests cover policy checks, decision resolution, config parsing, and signature verification. The integration suite (`crates/scaffold-server/tests/pipeline.rs`) drives the real HTTP clients end-to-end — signed webhook in, comment/labels out — against wiremock-faked GitHub, Anthropic, and Autumn APIs, including the quota-denied, billing-outage (fail-open + re-track), and dead-job escalation paths.
-
-## Status
-
-Live webhook pipeline verified end-to-end on a real GitHub App installation.
+A single binary plus Postgres — deployable to any container host.
