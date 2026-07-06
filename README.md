@@ -136,3 +136,5 @@ Unit tests cover policy checks, decision resolution, config parsing, and signatu
 ## Status
 
 Live webhook pipeline verified end-to-end on a real GitHub App installation.
+
+<!-- triage demo: 2026-07-06T10:49:24Z -->
